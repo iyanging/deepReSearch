@@ -1,0 +1,16 @@
+{
+  "python.analysis.packageIndexDepths": [
+    {
+      "name": "langchain",
+      "depth": 3
+    },
+    {
+      "name": "langchain_core",
+      "depth": 3
+    },
+    {
+      "name": "langgraph",
+      "depth": 3
+    }
+  ]
+}

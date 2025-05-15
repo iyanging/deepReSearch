@@ -1,0 +1,51 @@
+{
+  "$schema": "https://raw.githubusercontent.com/streetsidesoftware/cspell/main/cspell.schema.json",
+  "version": "0.2",
+  "enabled": true,
+  "ignorePaths": [
+    ".gitignore",
+    ".git"
+  ],
+  "dictionaries": [
+    "companies",
+    "misc",
+    "softwareTerms",
+    "typescript",
+    "node",
+    "python",
+    "html",
+    "css",
+    "bash",
+    "filetypes",
+    "npm",
+    "docker",
+    "k8s",
+    "python-common",
+    "sql"
+  ],
+  "words": [
+    "ainvoke",
+    "arun",
+    "astream",
+    "bigram",
+    "colorlog",
+    "csdn",
+    "customsearch",
+    "DDGS",
+    "deepseek",
+    "duckduckgo",
+    "GGUF",
+    "googleapiclient",
+    "iyanging",
+    "langchain",
+    "langgraph",
+    "levelname",
+    "MMLU",
+    "Mulan",
+    "ollama",
+    "pydantic",
+    "pyright",
+    "qwen",
+    "rerank"
+  ]
+}
