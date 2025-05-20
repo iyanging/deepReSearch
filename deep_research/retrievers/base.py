@@ -35,5 +35,10 @@ class RecoverableRetrieverError(Exception):
 
 
 class UnrecoverableRetrieverError(Exception):
+    """A exception that should not recover from.
+
+    Such as: Programming error.
+    """
+
     def __init__(self, message: str) -> None:
         super().__init__(message)

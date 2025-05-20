@@ -21,7 +21,7 @@ from deep_research.agents.planner import Planner
 from deep_research.config import Config
 from deep_research.llm import LlmApiProvider, LlmModel, LlmTryThinking
 from deep_research.logger import setup_logging
-from deep_research.retrievers.duckduckgo_search import DuckDuckGoSearch
+from deep_research.retrievers.browser_google_search import BrowserGoogleSearch
 
 
 class EnvVar(BaseSettings):
@@ -89,7 +89,8 @@ async def main() -> None:
     #     google_api_key=envs.retriever_google_api_key,
     #     google_search_engine_id=envs.retriever_google_search_engine_id,
     # )
-    retriever = DuckDuckGoSearch("wt-wt")
+    # retriever = DuckDuckGoSearch("wt-wt")
+    retriever = BrowserGoogleSearch()
     analyst = Analyst(
         config,
     )
