@@ -21,7 +21,7 @@ from deep_research.agents.planner import Planner
 from deep_research.config import Config
 from deep_research.llm import LlmApiProvider, LlmModel, LlmTryThinking
 from deep_research.logger import setup_logging
-from deep_research.retrievers.google_search import GoogleSearch
+from deep_research.retrievers.duckduckgo_search import DuckDuckGoSearch
 
 
 class EnvVar(BaseSettings):
@@ -46,7 +46,7 @@ class EnvVar(BaseSettings):
     analyst_llm_model: LlmModel
     analyst_context_length: NonNegativeInt | None = None
     analyst_llm_try_thinking: LlmTryThinking = "auto"
-    analyst_llm_temperature: NonNegativeFloat = 0.3
+    analyst_llm_temperature: NonNegativeFloat = 1.0
 
 
 async def main() -> None:
@@ -65,13 +65,14 @@ async def main() -> None:
         planner_blocked_document_link_host_pattern={".csdn.net"},
         planner_max_fetch_count_of_original_question_documents=30,
         planner_max_valid_count_of_original_question_documents=10,
-        planner_max_fetch_count_of_keywords_documents=30,
-        planner_max_valid_count_of_keywords_documents=10,
+        planner_max_fetch_count_of_original_keywords_documents=30,
+        planner_max_valid_count_of_original_keywords_documents=10,
+        planner_max_fetch_count_of_translated_keywords_documents=30,
+        planner_max_valid_count_of_translated_keywords_documents=10,
         planner_max_retries_of_searching_internet=3,
-        planner_max_retries_of_taking_document_note=3,
-        planner_max_retries_of_distilling_initial_note=3,
         planner_max_concurrency_of_checking_document_validity=4,
         planner_max_concurrency_of_calling_analyst=4,
+        planner_min_character_count_of_document_content=99,
         # analyst
         analyst_llm_api_provider=envs.analyst_llm_api_provider,
         analyst_llm_api_base_url=envs.analyst_llm_api_base_url,
@@ -80,12 +81,15 @@ async def main() -> None:
         analyst_llm_context_length=envs.analyst_context_length,
         analyst_llm_try_thinking=envs.analyst_llm_try_thinking,
         analyst_llm_temperature=envs.analyst_llm_temperature,
+        analyst_max_retries_of_taking_document_note=3,
+        analyst_max_retries_of_distilling_initial_note=3,
     )
 
-    retriever = GoogleSearch(
-        google_api_key=envs.retriever_google_api_key,
-        google_search_engine_id=envs.retriever_google_search_engine_id,
-    )
+    # retriever = GoogleSearch(
+    #     google_api_key=envs.retriever_google_api_key,
+    #     google_search_engine_id=envs.retriever_google_search_engine_id,
+    # )
+    retriever = DuckDuckGoSearch("wt-wt")
     analyst = Analyst(
         config,
     )
@@ -99,7 +103,7 @@ async def main() -> None:
     while not original_question:
         original_question = input("User! > ")
 
-    answer = await planner.solve(original_question)
+    answer = await planner.research(original_question)
 
     print("Agent >", answer)  # noqa: T201
 

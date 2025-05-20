@@ -59,6 +59,10 @@ class Document(BaseModel):
         return hash(self.link)
 
     @override
+    def __eq__(self, value: object) -> bool:
+        return type(self) is type(value) and hash(self) == hash(value)
+
+    @override
     def __str__(self) -> str:
         return repr(self)
 
@@ -110,7 +114,7 @@ class Document(BaseModel):
                             content_filter=PruningContentFilter(
                                 # Lower → more content retained
                                 # higher → more content pruned
-                                threshold=0.45,
+                                threshold=0.3,
                                 # "fixed" or "dynamic"
                                 threshold_type="dynamic",
                                 # Ignore nodes with <5 words

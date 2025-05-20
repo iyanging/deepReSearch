@@ -16,7 +16,8 @@ repos:
     rev: v1.5.5
     hooks:
       - id: insert-license
-        files: ^deep_research\/
+        types:
+          - python
         args:
           - --license-filepath
           - LICENSE.txt

@@ -12,8 +12,22 @@
 # See the Mulan PSL v2 for more details.
 
 import asyncio
-from collections.abc import AsyncIterator, Awaitable
-from typing import get_origin
+from collections.abc import (
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Collection,
+    Generator,
+    Hashable,
+    Sequence,
+    Set,
+)
+from functools import wraps
+from typing import Any, Concatenate, get_origin
+
+import backoff
+
+from deep_research.logger import root_logger
 
 
 def assert_type[T](obj: object, typ: type[T]) -> T:
@@ -32,13 +46,31 @@ def assert_not_none[T](obj: T | None, msg: str | None = None) -> T:
     return obj
 
 
+def count_without[T: Hashable](raw: Collection[T], without: set[T]) -> int:
+    c = 0
+    for r in raw:
+        if r not in without:
+            c += 1
+
+    return c
+
+
 async def parallel[T](
-    aws: set[Awaitable[T]],
+    aws: Set[Awaitable[T]],
     *,
     concurrency: int,
+    ignore_exceptions: bool,
 ) -> AsyncIterator[asyncio.Future[T]]:
-    futures = {asyncio.ensure_future(_parallel_shield(aw)) for aw in aws}
-    nows: set[asyncio.Future[asyncio.Future[T]]] = set()
+    futures = {
+        asyncio.ensure_future(
+            _parallel_shield(
+                aw,
+                ignore_exceptions=ignore_exceptions,
+            )
+        )
+        for aw in aws
+    }
+    nows: set[asyncio.Future[asyncio.Future[T] | None]] = set()
 
     while nows or futures:
         while len(nows) < concurrency and futures:
@@ -48,15 +80,57 @@ async def parallel[T](
         histories, nows = await asyncio.wait(nows, return_when=asyncio.FIRST_COMPLETED)
 
         for history in histories:
-            yield history.result()
+            fact = history.result()
+            if fact is not None:
+                yield fact
 
 
-async def _parallel_shield[T](aw: Awaitable[T]) -> asyncio.Future[T]:
-    result: asyncio.Future[T] = asyncio.Future()
+_parallel_logger = root_logger.getChild("parallel")
+
+
+async def _parallel_shield[T](
+    aw: Awaitable[T],
+    *,
+    ignore_exceptions: bool,
+) -> asyncio.Future[T] | None:
+    result: asyncio.Future[T] | None = asyncio.Future()
 
     try:
         result.set_result(await aw)
     except Exception as e:  # noqa: BLE001
-        result.set_exception(e)
+        if ignore_exceptions:
+            _parallel_logger.warning(
+                "awaitable %s raises an exception, ignoring it due to config",
+                aw,
+                exc_info=e,
+            )
+            result = None
+
+        else:
+            result.set_exception(e)
 
     return result
+
+
+def retryable[S, **P, R](
+    wait_gen: Callable[..., Generator[float]],
+    exception: type[Exception] | Sequence[type[Exception]],
+    *,
+    _: Callable[[S], None] | None = None,
+    max_tries: int | Callable[[S], int],
+    **wait_gen_kwargs: Any,
+) -> Callable[[Callable[Concatenate[S, P], R]], Callable[Concatenate[S, P], R]]:
+    def wrapper(func: Callable[Concatenate[S, P], R]) -> Callable[Concatenate[S, P], R]:
+        @wraps(func)
+        def wrapped(self: S, *args: P.args, **kwargs: P.kwargs) -> R:
+            return backoff.on_exception(
+                wait_gen,
+                exception,
+                jitter=None,
+                max_tries=(max_tries if not callable(max_tries) else max_tries(self)),
+                **wait_gen_kwargs,
+            )(func)(self, *args, **kwargs)
+
+        return wrapped
+
+    return wrapper

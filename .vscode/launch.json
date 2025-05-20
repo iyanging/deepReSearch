@@ -10,8 +10,15 @@
       "request": "launch",
       "module": "deep_research",
       "console": "integratedTerminal",
-      "justMyCode": false,
-      "purpose": ["debug-in-terminal"]
+      "justMyCode": false
+    },
+    {
+      "name": "Demo",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "streamlit",
+      "args": ["run", "demo.py"],
+      "justMyCode": false
     }
   ]
 }

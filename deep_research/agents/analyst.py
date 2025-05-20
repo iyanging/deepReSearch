@@ -14,10 +14,11 @@
 from collections.abc import Collection
 from typing import Annotated
 
+import backoff
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.tools import tool  # pyright: ignore[reportUnknownVariableType]
-from pydantic import BaseModel, HttpUrl, NonNegativeFloat, NonNegativeInt, SecretStr
+from pydantic import BaseModel, HttpUrl, NonNegativeFloat, NonNegativeInt, SecretStr, TypeAdapter
 
 from deep_research.llm import (
     LlmApiProvider,
@@ -30,7 +31,7 @@ from deep_research.llm import (
 )
 from deep_research.logger import root_logger
 from deep_research.resources.document import Document
-from deep_research.utils import assert_type
+from deep_research.utils import assert_type, retryable
 
 logger = root_logger.getChild(__name__)
 
@@ -43,11 +44,21 @@ class AnalystConfig(BaseModel):
     analyst_llm_context_length: NonNegativeInt | None
     analyst_llm_try_thinking: LlmTryThinking
     analyst_llm_temperature: NonNegativeFloat
+    analyst_max_retries_of_taking_document_note: NonNegativeInt
+    analyst_max_retries_of_distilling_initial_note: NonNegativeInt
+
+
+class AnalystError(Exception):
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
 
 
 class Analyst:
     cfg: AnalystConfig
     llm: BaseChatModel
+
+    @staticmethod
+    def __self_class(_: "Analyst") -> None: ...
 
     def __init__(self, cfg: AnalystConfig) -> None:
         super().__init__()
@@ -85,31 +96,53 @@ You are a highly sophisticated and rigorous information analyst and linguist,
 powered by "deepReSearch".
 """
 
-    async def extract_keywords(self, paragraph: str) -> list[str]:
-        keywords_container: list[str] = []
+    async def extract_keywords(
+        self,
+        paragraph: str,
+        with_language: str | None,
+    ) -> tuple[list[str], list[str]]:
+        original_keywords_container: list[str] = []
+        translated_keywords_container: list[str] = []
 
         @tool(return_direct=True)  # this is final call
         def _return_keywords(
-            terms: Annotated[list[str], "A list of extracted keywords."],
+            original_keywords: Annotated[
+                list[str],
+                "A list of extracted keywords, from original paragraph",
+            ],
+            translated_keywords: Annotated[
+                list[str],
+                """
+                A list of extracted keywords, from translated paragraph;
+                If you did not do translation, make the list empty.
+                """,
+            ],
         ) -> None:
             """Return extracted keywords."""
 
-            keywords_container.clear()
-            keywords_container.extend(terms)
+            original_keywords_container.clear()
+            original_keywords_container.extend(original_keywords)
+
+            translated_keywords_container.clear()
+            translated_keywords_container.extend(translated_keywords)
 
         system_prompt = SystemMessage(
             self._make_system_prompt(default_thinking=False)
             + f"""
 ## Task
-** Strict Lexical Analysis **:
-- Identify and extract ALL original keywords from the provided paragraph, including:
-    * Named entities (people, places, organizations)
+
+Extract keywords.
+
+- Identify and extract ALL keywords from the provided paragraph, including:
+    * Named entities (e.g., people, places, organizations)
     * Action verbs (e.g., "install", "compare")
     * Technical terms/phrases (maintain exact wording)
     * Numerical values/units
+- Remove modifiers, e.g., particles, adjectives
+- Exclude words that carry little substantive meaning, such as "how many", "whether"
 - Preserve even misspelled or ambiguous keywords exactly as given.
-- Extract keywords that, when combined, concisely yet fully capture the original meaning.
 - Keywords MUST be distinct and non-overlapping.
+- Separate compound words and ensure that each separated word has substantial meaning.
 - Result MUST be returned by using tool `{_return_keywords.name}`.
 
 ## ProhibitedActions
@@ -120,7 +153,13 @@ powered by "deepReSearch".
 """
         )
         user_prompt = HumanMessage(f"""
-Extract keywords from
+Isolated task:
+- Extract keywords from original paragraph, using the original language
+{
+            f"- Extract keywords from translated paragraph, using language {with_language}"
+            if with_language is not None
+            else ""
+        }
 
 ## Paragraph
 {paragraph}
@@ -132,16 +171,21 @@ Extract keywords from
             _return_keywords,
         )
 
-        if not keywords_container:
+        if not original_keywords_container:
             raise AnalystError("LLM does not provide the query fragments")
 
-        return keywords_container
+        # translated keywords may be empty
+
+        return (
+            original_keywords_container,
+            translated_keywords_container,
+        )
 
     async def judge_document_useful(
         self,
         questions: list[str],
         document: Document,
-    ) -> tuple[Document, bool]:
+    ) -> bool:
         @tool(return_direct=True)  # this is final call
         def _return_document_useful(
             may_be_useful: Annotated[
@@ -185,13 +229,20 @@ Judge if this document MAY be useful for answering the question.
         if document.may_be_useful is None:
             raise AnalystError("LLM does not provide the judgement of this document")
 
-        return (document, document.may_be_useful)
+        return document.may_be_useful
 
+    @retryable(
+        backoff.constant,
+        AnalystError,
+        _=__self_class,
+        max_tries=lambda x: x.cfg.analyst_max_retries_of_taking_document_note,
+        interval=3,
+    )
     async def take_document_note(
         self,
         question: str,
         document: "Document",
-    ) -> tuple[Document, str]:
+    ) -> tuple[str, str]:
         if not document.content:
             raise AnalystError("document content is empty")
 
@@ -199,19 +250,71 @@ Judge if this document MAY be useful for answering the question.
             self._make_system_prompt(default_thinking=True)
             + f"""
 ## Task
-Based on the provided document, take a note from content.
-The note should integrate all relevant information from the original text,
-which can help answer the specified questions and form a coherent paragraph.
-Please ensure that the note MUST include all original text information useful
+Based on the provided document,
+take a note from content, which can help answer the specified questions.
+And try to bring up a expanded new possible question.
+
+### Note
+The first note must fully reproduce all relevant information from the original text,
+including specific details, data points, and examples, without summarization or abstraction.
+The output should be a comprehensive and detailed paragraph
+that preserves the original context and content.
+Please ensure that the first note MUST include all original text information useful
 for answering the question.
-If content is useless, You MUST output `Useless content` directly, without any explanation.
+
+If content is useless for the first note, You MUST record `Useless content` directly.
+
+### Expanded New Possible Question
+
+Adopting an expanded perspective in documentation,
+check whether the original question contains ambiguities or vague points,
+then bring up a expanded new question to address those uncertainties.
+
+If you are sure that the original question is accurate,
+or content is useless for bring up a new question,
+You MUST record `No doubt` directly.
+
+## Output Example
+
+Output a two-elements list,
+the first element is the first note,
+the second element is the new possible question.
+
+Useful document, all notes are valid:
+```JSON
+["xxx", "xxx"]
+```
+
+Useful document, but only the note is valid:
+```JSON
+["xxx", "No doubt"]
+```
+
+Useful document, but only the new question is valid:
+```JSON
+["Useless content", "xxx"]
+```
+
+Useless document, none is valid:
+```JSON
+["Useless content", "No doubt"]
+```
+
+You MUST output json WITHOUT markdown tags like '```'.
+
+Bad:
+```JSON
+["", ""]
+```
+
+Good: ["", ""]
 
 ## Question
 {question}
 """
         )
         user_prompt = HumanMessage(f"""
-Take a note from document to help answer the specified questions.
+Take a note from document, then try to bring up a expanded new question.
 
 ## Document
 {document.render_markdown(level=3, with_link=False, with_content=True)}
@@ -221,14 +324,14 @@ Take a note from document to help answer the specified questions.
         logging_buf_size = 32
         logging_buf: list[str] = []
 
-        note_container: list[str] = []
+        result_container: list[str] = []
         async for chunk in call_llm_as_stream(
             self.llm,
             [system_prompt, user_prompt],
         ):
             content = chunk.text()
             if content:
-                note_container.append(content)
+                result_container.append(content)
 
             if len(logging_buf) >= logging_buf_size:
                 logger.info("chunks: %s", "".join(logging_buf))
@@ -252,11 +355,21 @@ Take a note from document to help answer the specified questions.
 
         logger.info("Finished LLM invocation")
 
-        if not note_container:
+        if not result_container:
             raise AnalystError("LLM does not provide the note")
 
-        return (document, "".join(note_container))
+        result = "".join(result_container)
+        original_note, expanded_question = TypeAdapter(tuple[str, str]).validate_json(result)
 
+        return (original_note, expanded_question)
+
+    @retryable(
+        backoff.constant,
+        AnalystError,
+        _=__self_class,
+        max_tries=lambda self: self.cfg.analyst_max_retries_of_distilling_initial_note,
+        interval=3,
+    )
     async def distill_note(
         self,
         question: str,
@@ -318,6 +431,4 @@ Distill a note from the following documents notes to help answer the specified q
         return note_container[0]
 
 
-class AnalystError(Exception):
-    def __init__(self, message: str) -> None:
-        super().__init__(message)
+def analyst_type_hint(cls: type[Analyst]) -> None: ...
