@@ -98,6 +98,9 @@ class BrowserGoogleSearch(Retriever[str]):
                     cleaned_html,
                 )
 
+                if not title_and_link_list:
+                    break
+
                 for title_and_link, snippet in zip(
                     title_and_link_list,
                     snippet_list,

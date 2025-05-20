@@ -160,6 +160,10 @@ class Planner:
             )
             logger.info("Fetched %d documents", len(unchecked_documents))
 
+            if not unchecked_documents:
+                logger.info("No more documents to fetch")
+                break
+
             async for result in parallel(
                 {
                     # pretend to be some kind of "rerank"
@@ -261,6 +265,9 @@ class Planner:
                 initial_documents,
                 partial_keywords_documents,
             )
+
+        if not initial_documents:
+            raise PlannerError("Has no useful documents")
 
         initial_sub_original_note: dict[Document, str] = {}
         initial_sub_expanded_note: dict[Document, str] = {}

@@ -249,22 +249,24 @@ Judge if this document MAY be useful for answering the question.
         system_prompt = SystemMessage(
             self._make_system_prompt(default_thinking=True)
             + f"""
-## Task
-Based on the provided document,
-take a note from content, which can help answer the specified questions.
-And try to bring up a expanded new possible question.
+# Task
+- Based on the provided document, take a note from content,
+    which can help answer the specified questions.
+- Try to bring up a expanded new possible question.
 
-### Note
-The first note must fully reproduce all relevant information from the original text,
-including specific details, data points, and examples, without summarization or abstraction.
-The output should be a comprehensive and detailed paragraph
-that preserves the original context and content.
-Please ensure that the first note MUST include all original text information useful
-for answering the question.
+## Note
+- The first note must fully reproduce all relevant information from the original text,
+    including specific details, data points, and examples, without summarization or abstraction.
+- The output should be a comprehensive and detailed paragraph
+    that preserves the original context and content.
+- Please ensure that the first note MUST include all original text information useful
+    for answering the question.
+- Identify the language of the question and take note in the same language.
+- Use multiple paragraphs to separate different ideas or points.
+- No markdown formatting.
+- If content is useless for the first note, You MUST record `Useless content` directly.
 
-If content is useless for the first note, You MUST record `Useless content` directly.
-
-### Expanded New Possible Question
+## Expanded New Possible Question
 
 Adopting an expanded perspective in documentation,
 check whether the original question contains ambiguities or vague points,
@@ -274,13 +276,13 @@ If you are sure that the original question is accurate,
 or content is useless for bring up a new question,
 You MUST record `No doubt` directly.
 
-## Output Example
+# Output Example
 
 Output a two-elements list,
 the first element is the first note,
 the second element is the new possible question.
 
-Useful document, all notes are valid:
+Useful document, the note and the expanded question are valid:
 ```JSON
 ["xxx", "xxx"]
 ```
@@ -290,7 +292,7 @@ Useful document, but only the note is valid:
 ["xxx", "No doubt"]
 ```
 
-Useful document, but only the new question is valid:
+Useful document, but only the expanded question is valid:
 ```JSON
 ["Useless content", "xxx"]
 ```
@@ -304,20 +306,20 @@ You MUST output json WITHOUT markdown tags like '```'.
 
 Bad:
 ```JSON
-["", ""]
+["xxx", "xxx"]
 ```
 
-Good: ["", ""]
+Good: ["xxx", "xxx"]
 
-## Question
+# Question
 {question}
 """
         )
         user_prompt = HumanMessage(f"""
 Take a note from document, then try to bring up a expanded new question.
 
-## Document
-{document.render_markdown(level=3, with_link=False, with_content=True)}
+# Document
+{document.render_markdown(level=2, with_link=False, with_content=True)}
 """)
 
         logger.info("Invoke LLM")
