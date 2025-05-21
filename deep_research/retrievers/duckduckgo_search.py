@@ -19,6 +19,7 @@ from duckduckgo_search import exceptions as ddgs_exceptions
 from langchain_core.runnables import run_in_executor
 from pydantic import NonNegativeInt, PositiveInt
 
+from deep_research.context import Context
 from deep_research.logger import root_logger
 from deep_research.resources.document import Document
 from deep_research.retrievers.base import RecoverableRetrieverError, Retriever
@@ -39,6 +40,7 @@ class DuckDuckGoSearch(Retriever[str]):
     @override
     async def retrieve(
         self,
+        ctx: Context,
         query: str,
         *,
         offset: NonNegativeInt,

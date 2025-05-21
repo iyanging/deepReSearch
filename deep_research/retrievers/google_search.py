@@ -22,6 +22,7 @@ from googleapiclient.discovery import (
 from langchain_core.runnables import run_in_executor
 from pydantic import NonNegativeInt, PositiveInt, SecretStr
 
+from deep_research.context import Context
 from deep_research.logger import root_logger
 from deep_research.resources.document import Document
 from deep_research.retrievers.base import Retriever, UnrecoverableRetrieverError
@@ -55,6 +56,7 @@ class GoogleSearch(Retriever[str]):
     @override
     async def retrieve(
         self,
+        ctx: Context,
         query: str,
         *,
         offset: NonNegativeInt,

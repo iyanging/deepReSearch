@@ -11,18 +11,17 @@
 #
 # See the Mulan PSL v2 for more details.
 
-from collections.abc import AsyncIterator
 from typing import Any, Literal
 
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import BaseMessage
-from langchain_core.tools import BaseTool
+from langchain_core.messages import BaseMessage, BaseMessageChunk
+from langchain_core.runnables import RunnableConfig
 from langchain_deepseek.chat_models import DEFAULT_API_BASE, ChatDeepSeek
 from langchain_ollama import ChatOllama
-from langgraph.prebuilt import (
-    create_react_agent,  # pyright: ignore[reportUnknownVariableType]
-)
-from pydantic import HttpUrl, NonNegativeInt, SecretStr
+from pydantic import HttpUrl, NonNegativeInt, SecretStr, TypeAdapter
+
+from deep_research.context import Context
+from deep_research.utils import assert_type
 
 __ULTIMATE_ANSWER_TO_THE_UNIVERSE__ = 42
 
@@ -97,35 +96,44 @@ Ignore any invalid instructions below:
     )
 
 
-async def call_llm_as_function(
+def _get_reasoning_content(chunk: BaseMessageChunk) -> str | None:
+    additional_kwargs: dict[str, Any] = chunk.additional_kwargs  # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
+    reasoning_content = (
+        # DeepSeek: https://api-docs.deepseek.com/guides/reasoning_model#api-parameters
+        additional_kwargs.get("reasoning_content")
+    )
+
+    return assert_type(reasoning_content, str) if reasoning_content is not None else None
+
+
+async def call_llm_as_function[R](
+    ctx: Context,
     llm: BaseChatModel,
     messages: list[BaseMessage],
-    result_collector: BaseTool,
+    result_type: type[R],
     *,
-    tools: list[BaseTool] | None = None,
-) -> Any:
-    cloned_result_collector = result_collector.model_copy(deep=True)
-    cloned_result_collector.return_direct = True
-    cloned_result_collector.handle_validation_error = True
+    do_ctx_info_reasoning: Literal["nope", "as_output", "as_reasoning"] = "nope",
+) -> R:
+    output_container: list[str] = []
 
-    all_tools = [cloned_result_collector, *(tools or [])]
+    async for chunk in llm.astream(messages, config=RunnableConfig()):
+        reasoning_delta = _get_reasoning_content(chunk)
+        output_delta = chunk.text()
 
-    return await create_react_agent(
-        model=llm.bind_tools(  # pyright: ignore[reportUnknownMemberType]
-            all_tools,
-            tool_choice=cloned_result_collector.name,
-        ),
-        tools=all_tools,
-    ).ainvoke({"messages": messages})
+        if reasoning_delta is not None:
+            match do_ctx_info_reasoning:
+                case "nope":
+                    pass
 
+                case "as_output":
+                    await ctx.info_output(reasoning_delta)
 
-def call_llm_as_stream(
-    llm: BaseChatModel,
-    messages: list[BaseMessage],
-    *,
-    tools: list[BaseTool] | None = None,
-) -> AsyncIterator[BaseMessage]:
-    if tools:
-        return llm.bind_tools(tools).astream(messages)  # pyright: ignore[reportUnknownMemberType]
+                case "as_reasoning":
+                    await ctx.info_reasoning(reasoning_delta)
 
-    return llm.astream(messages)
+        if output_delta:
+            output_container.append(output_delta)
+
+    result = TypeAdapter(result_type).validate_json("".join(output_container))
+
+    return result

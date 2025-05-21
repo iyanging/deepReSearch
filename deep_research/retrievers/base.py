@@ -16,12 +16,14 @@ from typing import Protocol
 
 from pydantic import NonNegativeInt, PositiveInt
 
+from deep_research.context import Context
 from deep_research.resources.document import Document
 
 
 class Retriever[QueryT](Protocol):
     async def retrieve(
         self,
+        ctx: Context,
         query: QueryT,
         *,
         offset: NonNegativeInt,

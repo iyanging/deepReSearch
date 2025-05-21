@@ -25,6 +25,7 @@ from crawl4ai import (
 from crawl4ai.models import CrawlResultContainer
 from pydantic import NonNegativeInt, PositiveInt
 
+from deep_research.context import Context
 from deep_research.resources.document import Document
 from deep_research.retrievers.base import RecoverableRetrieverError, Retriever
 from deep_research.utils import assert_type
@@ -36,6 +37,7 @@ class BrowserGoogleSearch(Retriever[str]):
     @override
     async def retrieve(
         self,
+        ctx: Context,
         query: str,
         *,
         offset: NonNegativeInt,

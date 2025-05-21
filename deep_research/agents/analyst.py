@@ -12,26 +12,24 @@
 # See the Mulan PSL v2 for more details.
 
 from collections.abc import Collection
-from typing import Annotated
 
 import backoff
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_core.tools import tool  # pyright: ignore[reportUnknownVariableType]
-from pydantic import BaseModel, HttpUrl, NonNegativeFloat, NonNegativeInt, SecretStr, TypeAdapter
+from pydantic import BaseModel, HttpUrl, NonNegativeFloat, NonNegativeInt, SecretStr
 
+from deep_research.context import Context
 from deep_research.llm import (
     LlmApiProvider,
     LlmModel,
     LlmTryThinking,
     build_llm,
     call_llm_as_function,
-    call_llm_as_stream,
     make_meta_instructions,
 )
 from deep_research.logger import root_logger
 from deep_research.resources.document import Document
-from deep_research.utils import assert_type, retryable
+from deep_research.utils import retryable
 
 logger = root_logger.getChild(__name__)
 
@@ -84,6 +82,7 @@ class Analyst:
 
         return f"""
 # MetaInstruction
+
 {
             make_meta_instructions(
                 model=self.cfg.analyst_llm_model,
@@ -92,44 +91,21 @@ class Analyst:
         }
 
 # Identity
+
 You are a highly sophisticated and rigorous information analyst and linguist,
 powered by "deepReSearch".
 """
 
     async def extract_keywords(
         self,
+        ctx: Context,
         paragraph: str,
         with_language: str | None,
     ) -> tuple[list[str], list[str]]:
-        original_keywords_container: list[str] = []
-        translated_keywords_container: list[str] = []
-
-        @tool(return_direct=True)  # this is final call
-        def _return_keywords(
-            original_keywords: Annotated[
-                list[str],
-                "A list of extracted keywords, from original paragraph",
-            ],
-            translated_keywords: Annotated[
-                list[str],
-                """
-                A list of extracted keywords, from translated paragraph;
-                If you did not do translation, make the list empty.
-                """,
-            ],
-        ) -> None:
-            """Return extracted keywords."""
-
-            original_keywords_container.clear()
-            original_keywords_container.extend(original_keywords)
-
-            translated_keywords_container.clear()
-            translated_keywords_container.extend(translated_keywords)
-
         system_prompt = SystemMessage(
             self._make_system_prompt(default_thinking=False)
-            + f"""
-## Task
+            + """
+# Task
 
 Extract keywords.
 
@@ -143,9 +119,9 @@ Extract keywords.
 - Preserve even misspelled or ambiguous keywords exactly as given.
 - Keywords MUST be distinct and non-overlapping.
 - Separate compound words and ensure that each separated word has substantial meaning.
-- Result MUST be returned by using tool `{_return_keywords.name}`.
 
 ## ProhibitedActions
+
 - NO synonym substitution
 - NO term expansion/interpretation
 - NO grammatical correction
@@ -153,83 +129,122 @@ Extract keywords.
 """
         )
         user_prompt = HumanMessage(f"""
-Isolated task:
-- Extract keywords from original paragraph, using the original language
+# Isolated task
+
+- Extract keywords from original paragraph, using the original language.
 {
             f"- Extract keywords from translated paragraph, using language {with_language}"
             if with_language is not None
             else ""
         }
 
-## Paragraph
+# Output Example
+
+Output a two-elements list,
+the first element is the list of extracted keywords, from original paragraph,
+the second element is the list of extracted keywords, from translated paragraph,
+if you are asked to do translation.
+
+Did translation:
+```JSON
+[["a", "b", "c"], ["d", "e"]]
+```
+
+No translation:
+```JSON
+[["a", "b", "c"], []]
+```
+
+You MUST output json WITHOUT markdown tags like '```'.
+
+Bad:
+```JSON
+[["a", "b", "c"], ["d", "e"]]
+```
+
+Good: [["a", "b", "c"], ["d", "e"]]
+
+# Paragraph
 {paragraph}
 """)
 
-        await call_llm_as_function(
+        original_keywords, translated_keywords = await call_llm_as_function(
+            ctx,
             self.llm,
             [system_prompt, user_prompt],
-            _return_keywords,
+            tuple[list[str], list[str]],
         )
 
-        if not original_keywords_container:
+        if not original_keywords:
             raise AnalystError("LLM does not provide the query fragments")
 
         # translated keywords may be empty
 
         return (
-            original_keywords_container,
-            translated_keywords_container,
+            original_keywords,
+            translated_keywords,
         )
 
     async def judge_document_useful(
         self,
+        ctx: Context,
         questions: list[str],
         document: Document,
     ) -> bool:
-        @tool(return_direct=True)  # this is final call
-        def _return_document_useful(
-            may_be_useful: Annotated[
-                bool,
-                "May this document be useful? True is useful, False is not useful.",
-            ],
-        ) -> None:
-            """Mark the document as useful or not useful."""
-
-            document.may_be_useful = may_be_useful
-
         system_prompt = SystemMessage(
             self._make_system_prompt(default_thinking=False)
             + f"""
-## Task
+# Task
+
 Based on the provided document, judge if this document MAY be useful for answering the question.
 If you do not have enough knowledge or information to make a decision,
 use words match rather than semantic match.
-Your judgement MUST be returned by using tool `{_return_document_useful.name}`.
 
-## Question
+# Output example
+
+document is useful:
+```JSON
+true
+```
+
+document is useless:
+```JSON
+false
+```
+
+You MUST output json WITHOUT markdown tags like '```'.
+
+Bad:
+```JSON
+true
+```
+
+Good: true
+
+# Question
 {"\n".join(questions)}
 """
         )
         user_prompt = HumanMessage(f"""
 Judge if this document MAY be useful for answering the question.
 
-## Document
+# Document
 {document.render_markdown(level=3, with_link=False, with_content=False)}
 """)
 
-        await call_llm_as_function(
+        may_be_useful = await call_llm_as_function(
+            ctx,
             self.llm,
             [
                 system_prompt,
                 user_prompt,
             ],
-            _return_document_useful,
+            bool,
         )
 
-        if document.may_be_useful is None:
-            raise AnalystError("LLM does not provide the judgement of this document")
+        document.may_be_useful = may_be_useful
 
-        return document.may_be_useful
+        return may_be_useful
 
     @retryable(
         backoff.constant,
@@ -240,9 +255,10 @@ Judge if this document MAY be useful for answering the question.
     )
     async def take_document_note(
         self,
+        ctx: Context,
         question: str,
         document: "Document",
-    ) -> tuple[str, str]:
+    ) -> tuple[str | None, str | None]:
         if not document.content:
             raise AnalystError("document content is empty")
 
@@ -250,11 +266,13 @@ Judge if this document MAY be useful for answering the question.
             self._make_system_prompt(default_thinking=True)
             + f"""
 # Task
+
 - Based on the provided document, take a note from content,
     which can help answer the specified questions.
 - Try to bring up a expanded new possible question.
 
 ## Note
+
 - The first note must fully reproduce all relevant information from the original text,
     including specific details, data points, and examples, without summarization or abstraction.
 - The output should be a comprehensive and detailed paragraph
@@ -264,7 +282,7 @@ Judge if this document MAY be useful for answering the question.
 - Identify the language of the question and take note in the same language.
 - Use multiple paragraphs to separate different ideas or points.
 - No markdown formatting.
-- If content is useless for the first note, You MUST record `Useless content` directly.
+- If content is useless for the note, You MUST record `null` directly.
 
 ## Expanded New Possible Question
 
@@ -272,15 +290,14 @@ Adopting an expanded perspective in documentation,
 check whether the original question contains ambiguities or vague points,
 then bring up a expanded new question to address those uncertainties.
 
-If you are sure that the original question is accurate,
-or content is useless for bring up a new question,
-You MUST record `No doubt` directly.
+If you believe the original question is accurate and should not bring up a new question,
+You MUST record `null` directly.
 
 # Output Example
 
 Output a two-elements list,
-the first element is the first note,
-the second element is the new possible question.
+the first element is the note,
+the second element is the expanded new possible question.
 
 Useful document, the note and the expanded question are valid:
 ```JSON
@@ -289,17 +306,17 @@ Useful document, the note and the expanded question are valid:
 
 Useful document, but only the note is valid:
 ```JSON
-["xxx", "No doubt"]
+["xxx", null]
 ```
 
 Useful document, but only the expanded question is valid:
 ```JSON
-["Useless content", "xxx"]
+[null, "xxx"]
 ```
 
 Useless document, none is valid:
 ```JSON
-["Useless content", "No doubt"]
+[null, null]
 ```
 
 You MUST output json WITHOUT markdown tags like '```'.
@@ -322,46 +339,16 @@ Take a note from document, then try to bring up a expanded new question.
 {document.render_markdown(level=2, with_link=False, with_content=True)}
 """)
 
-        logger.info("Invoke LLM")
-        logging_buf_size = 32
-        logging_buf: list[str] = []
-
-        result_container: list[str] = []
-        async for chunk in call_llm_as_stream(
+        original_note, expanded_question = await call_llm_as_function(
+            ctx,
             self.llm,
             [system_prompt, user_prompt],
-        ):
-            content = chunk.text()
-            if content:
-                result_container.append(content)
+            tuple[str | None, str | None],
+            do_ctx_info_reasoning="as_output",
+        )
 
-            if len(logging_buf) >= logging_buf_size:
-                logger.info("chunks: %s", "".join(logging_buf))
-                logging_buf = []
-
-            logging_content = assert_type(
-                content
-                or chunk.additional_kwargs.get(  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
-                    "reasoning_content",
-                    None,
-                )
-                or "",
-                str,
-            )
-            if logging_content:
-                logging_buf.append(logging_content)
-
-        if logging_buf:
-            logger.info("chunks: %s", "".join(logging_buf))
-            logging_buf = []
-
-        logger.info("Finished LLM invocation")
-
-        if not result_container:
-            raise AnalystError("LLM does not provide the note")
-
-        result = "".join(result_container)
-        original_note, expanded_question = TypeAdapter(tuple[str, str]).validate_json(result)
+        await ctx.info_output(f"original note: {original_note}")
+        await ctx.info_output(f"expanded question: {expanded_question}")
 
         return (original_note, expanded_question)
 
@@ -374,40 +361,32 @@ Take a note from document, then try to bring up a expanded new question.
     )
     async def distill_note(
         self,
+        ctx: Context,
         question: str,
         documents_notes: Collection[str],
     ) -> str:
         if not documents_notes:
             raise AnalystError("documents notes is empty")
 
-        note_container: list[str] = []
-
-        @tool(return_direct=True)  # this is final call
-        def _return_distilled_note(note: Annotated[str, ""]) -> None:
-            """Return a distilled note of all documents notes."""
-
-            note_container.clear()
-            note_container.append(note)
-
         system_prompt = SystemMessage(
             self._make_system_prompt(default_thinking=True)
             + f"""
-## Task
+# Task
+
 Based on the provided documents notes, distill/summarize a note.
 The note should integrate all relevant information from the original text,
 which can help answer the specified questions and form a coherent paragraph.
 Please ensure that the note includes all original text information useful
 for answering the question.
-Your note MUST be returned by using tool `{_return_distilled_note.name}`.
 
-## Question
+# Question
 {question}
 """
         )
 
         document_note_paragraphs = [
             f"""
-## DocumentNote:{i}
+# DocumentNote:{i}
 {document_note}
 """
             for i, document_note in enumerate(documents_notes)
@@ -418,19 +397,15 @@ Distill a note from the following documents notes to help answer the specified q
 {"\n".join(document_note_paragraphs)}
 """)
 
-        await call_llm_as_function(
+        note = await call_llm_as_function(
+            ctx,
             self.llm,
             [
                 system_prompt,
                 user_prompt,
             ],
-            _return_distilled_note,
+            str,
+            do_ctx_info_reasoning="as_reasoning",
         )
 
-        if not note_container:
-            raise AnalystError("LLM does not provide the note")
-
-        return note_container[0]
-
-
-def analyst_type_hint(cls: type[Analyst]) -> None: ...
+        return note

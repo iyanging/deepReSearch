@@ -13,12 +13,14 @@
 
 
 import string
+from functools import partial
 
 import backoff
 from langchain_core.language_models import BaseChatModel
 from pydantic import BaseModel, HttpUrl, NonNegativeFloat, NonNegativeInt, PositiveInt, SecretStr
 
 from deep_research.agents.analyst import Analyst
+from deep_research.context import Context
 from deep_research.llm import LlmApiProvider, LlmModel, LlmTryThinking, build_llm
 from deep_research.logger import root_logger
 from deep_research.resources.document import Document, DocumentError
@@ -112,6 +114,7 @@ class Planner:
 
     async def search_internet_with_filter(
         self,
+        ctx: Context,
         query: str,
         *,
         max_fetch_count: int,
@@ -151,8 +154,9 @@ class Planner:
                     RecoverableRetrieverError,
                     jitter=None,
                     max_tries=self.cfg.planner_max_retries_of_searching_internet,
-                    interval=3,
+                    interval=3,  # TODO: parameterize
                 )(self.retriever.retrieve)(
+                    ctx,
                     query,
                     offset=len(checked_document_to_validity),  # checked document count
                     limit=search_count,
@@ -164,6 +168,7 @@ class Planner:
                 logger.info("No more documents to fetch")
                 break
 
+            # TODO: design a DocumentFetcher to skip fetching those checked documents
             async for result in parallel(
                 {
                     # pretend to be some kind of "rerank"
@@ -194,13 +199,15 @@ class Planner:
 
     async def take_document_note(
         self,
+        ctx: Context,
         question: str,
         document: Document,
-    ) -> tuple[Document, tuple[str, str] | None]:
+    ) -> tuple[Document, tuple[str, str | None] | None]:
         if document.may_be_useful is False:
             return (document, None)
 
         may_be_useful = await self.analyst.judge_document_useful(
+            ctx,
             [question],
             document,
         )
@@ -209,72 +216,85 @@ class Planner:
             return (document, None)
 
         note, expanded_question = await self.analyst.take_document_note(
+            ctx,
             question,
             document,
         )
 
-        return (document, (note, expanded_question))
-
-    async def take_initial_note(self, original_question: str) -> str:
-        logger.info("Extract keywords from original question")
-
-        original_keywords, translated_keywords = await self.analyst.extract_keywords(
-            original_question,
-            "english",
+        return (
+            document,
+            (note, expanded_question) if note is not None else None,
         )
 
-        logger.info("Original keywords: %s", original_keywords)
-        logger.info("Translated keywords: %s", translated_keywords)
-
-        logger.info("Search internet for original question and keywords")
-
-        # TODO: design a DocumentFetcher to skip fetching those checked documents
-        original_keywords_query = " ".join(original_keywords)
-        translated_keywords_query = " ".join(translated_keywords)
-
-        search_tasks = {
-            self.search_internet_with_filter(
+    async def take_initial_note(self, ctx: Context, original_question: str) -> str:
+        async with ctx.scope("Extract keyword") as sub:
+            original_keywords, translated_keywords = await self.analyst.extract_keywords(
+                sub,
                 original_question,
-                max_fetch_count=self.cfg.planner_max_fetch_count_of_original_question_documents,
-                max_valid_count=self.cfg.planner_max_valid_count_of_original_question_documents,
-            ),
-            self.search_internet_with_filter(
-                original_keywords_query,
-                max_fetch_count=self.cfg.planner_max_fetch_count_of_original_keywords_documents,
-                max_valid_count=self.cfg.planner_max_valid_count_of_original_keywords_documents,
-            ),
-        }
-        if translated_keywords_query:
-            search_tasks.add(
+                "english",
+            )
+
+            await sub.info_output(f"Original keywords: {original_keywords}")
+            await sub.info_output(f"Translated keywords: {translated_keywords}")
+
+        async with ctx.scope("Search internet for original question and keywords") as sub:
+            # TODO: may extract these into a query string builder
+            original_keywords_query = " ".join(original_keywords)
+            translated_keywords_query = " ".join(translated_keywords)
+
+            search_tasks = {
                 self.search_internet_with_filter(
-                    translated_keywords_query,
-                    max_fetch_count=self.cfg.planner_max_fetch_count_of_translated_keywords_documents,
-                    max_valid_count=self.cfg.planner_max_valid_count_of_translated_keywords_documents,
+                    sub,
+                    original_question,
+                    max_fetch_count=self.cfg.planner_max_fetch_count_of_original_question_documents,
+                    max_valid_count=self.cfg.planner_max_valid_count_of_original_question_documents,
+                ),
+                self.search_internet_with_filter(
+                    sub,
+                    original_keywords_query,
+                    max_fetch_count=self.cfg.planner_max_fetch_count_of_original_keywords_documents,
+                    max_valid_count=self.cfg.planner_max_valid_count_of_original_keywords_documents,
+                ),
+            }
+            if translated_keywords_query:
+                search_tasks.add(
+                    self.search_internet_with_filter(
+                        sub,
+                        translated_keywords_query,
+                        max_fetch_count=self.cfg.planner_max_fetch_count_of_translated_keywords_documents,
+                        max_valid_count=self.cfg.planner_max_valid_count_of_translated_keywords_documents,
+                    )
                 )
-            )
 
-        initial_documents: set[Document] = set()
-        async for search_result in parallel(
-            search_tasks,
-            concurrency=len(search_tasks),
-            ignore_exceptions=True,
-        ):
-            partial_keywords_documents = search_result.result()
+            initial_documents: set[Document] = set()
+            async for search_result in parallel(
+                search_tasks,
+                concurrency=len(search_tasks),
+                ignore_exceptions=True,
+            ):
+                partial_keywords_documents = search_result.result()
 
-            initial_documents = self._merge_document_set(
-                initial_documents,
-                partial_keywords_documents,
-            )
+                initial_documents = self._merge_document_set(
+                    initial_documents,
+                    partial_keywords_documents,
+                )
 
-        if not initial_documents:
-            raise PlannerError("Has no useful documents")
+            if not initial_documents:
+                raise PlannerError("Has no useful documents")
 
         initial_sub_original_note: dict[Document, str] = {}
         initial_sub_expanded_note: dict[Document, str] = {}
 
         async for result in parallel(
             {
-                self.take_document_note(original_question, document)
+                (
+                    f := partial(
+                        self.take_document_note,
+                        question=original_question,
+                        document=document,
+                    )
+                )
+                and ctx.enter(f"Read {document.title}", f)
                 for document in initial_documents
             },
             concurrency=self.cfg.planner_max_concurrency_of_calling_analyst,
@@ -283,33 +303,33 @@ class Planner:
             document, note_and_question = result.result()
 
             if note_and_question is None:
-                logger.info(
-                    "Document judged useless, skip taking note, document: %s",
-                    document,
-                )
+                # Document judged useless, skip
                 continue
 
             original_note, expanded_question = note_and_question
 
             initial_sub_original_note[document] = original_note
-            initial_sub_expanded_note[document] = expanded_question
+
+            if expanded_question is not None:
+                initial_sub_expanded_note[document] = expanded_question
 
         if not initial_sub_original_note:
             raise PlannerError("Has no useful documents notes")
 
         # TODO: handle expanded questions
 
-        logger.info("Distill to initial note")
-
-        initial_note = await self.analyst.distill_note(
-            original_question,
-            initial_sub_original_note.values(),
-        )
+        async with ctx.scope("Distill to initial note") as sub:
+            initial_note = await self.analyst.distill_note(
+                sub,
+                original_question,
+                initial_sub_original_note.values(),
+            )
 
         return initial_note
 
     async def research(self, original_question: str) -> str:
-        initial_note = await self.take_initial_note(original_question)
+        async with Context("Research") as sub:
+            initial_note = await self.take_initial_note(sub, original_question)
 
         return initial_note
 
