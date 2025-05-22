@@ -147,22 +147,22 @@ if you are asked to do translation.
 
 Did translation:
 ```JSON
-[["a", "b", "c"], ["d", "e"]]
+[["a", "b cd", "e f"], ["ghi", "j k"]]
 ```
 
 No translation:
 ```JSON
-[["a", "b", "c"], []]
+[["a", "b cd", "e f"], []]
 ```
 
 You MUST output json WITHOUT markdown tags like '```'.
 
 Bad:
 ```JSON
-[["a", "b", "c"], ["d", "e"]]
+[["a", "b cd", "e f"], ["ghi", "j k"]]
 ```
 
-Good: [["a", "b", "c"], ["d", "e"]]
+Good: [["a", "b cd", "e f"], ["ghi", "j k"]]
 
 # Paragraph
 {paragraph}
