@@ -10,6 +10,7 @@
       "request": "launch",
       "module": "streamlit",
       "args": ["run", "demo.py"],
+      "envFile": "${workspaceFolder}/.env",
       "justMyCode": false
     }
   ]

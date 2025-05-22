@@ -17,10 +17,12 @@ from contextlib import AbstractAsyncContextManager
 from types import TracebackType
 from typing import Final, Literal, NoReturn, overload, override
 
+from deep_research.utils import assert_not_none
+
 
 class ContextCollaborator(ABC):
     @abstractmethod
-    async def aenter(self, context: "Context") -> None:
+    async def aenter(self, new_context: "Context") -> "ContextCollaborator":
         raise NotImplementedError
 
     @abstractmethod
@@ -36,21 +38,23 @@ class ContextCollaborator(ABC):
     async def state(self, status: str) -> None:  # noqa: ARG002, PLR6301
         return
 
-    async def info_reasoning(self, delta: str) -> None:  # noqa: ARG002, PLR6301
+    async def info_reasoning(self, delta: str | Literal[0]) -> None:  # noqa: ARG002, PLR6301
         return
 
-    async def info_output(self, delta: str) -> None:  # noqa: ARG002, PLR6301
+    async def info_output(self, delta: str | Literal[0]) -> None:  # noqa: ARG002, PLR6301
+        return
+
+    async def info(self, message: str) -> None:  # noqa: ARG002, PLR6301
         return
 
 
 class Context(AbstractAsyncContextManager["Context"]):
+    run_id: str
     name: Final[str]
     stack: "Final[list[Context]]"
 
-    collaborators: list[ContextCollaborator]
-
-    @overload
-    def __init__(self, name: str) -> None: ...
+    in_ctx_collaborators: list[ContextCollaborator]
+    out_ctx_collaborators: list[ContextCollaborator]
 
     @overload
     def __init__(
@@ -58,7 +62,8 @@ class Context(AbstractAsyncContextManager["Context"]):
         name: str,
         *,
         parent: None = None,
-        collaborators: list[ContextCollaborator],
+        run_id: str,
+        collaborators: list[ContextCollaborator] | None = None,
     ) -> None: ...
 
     @overload
@@ -67,6 +72,7 @@ class Context(AbstractAsyncContextManager["Context"]):
         name: str,
         *,
         parent: "Context",
+        run_id: None = None,
         collaborators: None = None,
     ) -> None: ...
 
@@ -76,7 +82,18 @@ class Context(AbstractAsyncContextManager["Context"]):
         name: str,
         *,
         parent: "Context",
+        run_id: str | None = None,
         collaborators: list[ContextCollaborator],
+    ) -> NoReturn: ...
+
+    @overload
+    def __init__(
+        self,
+        name: str,
+        *,
+        parent: "Context",
+        run_id: str,
+        collaborators: list[ContextCollaborator] | None = None,
     ) -> NoReturn: ...
 
     def __init__(
@@ -84,21 +101,25 @@ class Context(AbstractAsyncContextManager["Context"]):
         name: str,
         *,
         parent: "Context | None" = None,
+        run_id: str | None = None,
         collaborators: list[ContextCollaborator] | None = None,
     ) -> None:
         super().__init__()
 
         self.name = name
+        self.in_ctx_collaborators = []
 
         if parent is not None:
+            self.run_id = parent.run_id
             self.stack = [parent, *parent.stack]
-            self.collaborators = parent.collaborators
+            self.out_ctx_collaborators = [*parent.in_ctx_collaborators]
 
         else:
+            self.run_id = assert_not_none(run_id)
             self.stack = []
             # collaborators should not access Context.collaborators during the initialization,
             # otherwise it will raise AttributeError
-            self.collaborators = collaborators or []
+            self.out_ctx_collaborators = [*collaborators] if collaborators is not None else []
 
     @override
     def __repr__(self) -> str:
@@ -120,8 +141,7 @@ class Context(AbstractAsyncContextManager["Context"]):
 
     @override
     async def __aenter__(self) -> "Context":
-        for co in self.collaborators:
-            await co.aenter(self)
+        self.in_ctx_collaborators = [await co.aenter(self) for co in self.out_ctx_collaborators]
 
         return self
 
@@ -132,13 +152,15 @@ class Context(AbstractAsyncContextManager["Context"]):
         exc_value: BaseException | None,
         traceback: TracebackType | None,
     ) -> Literal[False]:
-        for co in self.collaborators:
+        for co in self.in_ctx_collaborators:
             await co.aexit(
                 self,
                 exc_type,
                 exc_value,
                 traceback,
             )
+
+        self.in_ctx_collaborators = []
 
         return False  # exception should go up.
 
@@ -148,13 +170,17 @@ class Context(AbstractAsyncContextManager["Context"]):
             return await root.state(status)
 
         else:
-            for co in self.collaborators:
+            for co in self.in_ctx_collaborators:
                 await co.state(status)
 
-    async def info_output(self, message: str) -> None:
-        for co in self.collaborators:
-            await co.info_output(message)
+    async def info_output(self, delta: str | Literal[0]) -> None:
+        for co in self.in_ctx_collaborators:
+            await co.info_output(delta)
 
-    async def info_reasoning(self, delta: str) -> None:
-        for co in self.collaborators:
+    async def info_reasoning(self, delta: str | Literal[0]) -> None:
+        for co in self.in_ctx_collaborators:
             await co.info_reasoning(delta)
+
+    async def info(self, message: str) -> None:
+        for co in self.in_ctx_collaborators:
+            await co.info(message)

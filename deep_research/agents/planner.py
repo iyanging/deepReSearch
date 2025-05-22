@@ -213,6 +213,7 @@ class Planner:
         )
 
         if not may_be_useful:
+            await ctx.info("Useless document")
             return (document, None)
 
         note, expanded_question = await self.analyst.take_document_note(
@@ -234,8 +235,8 @@ class Planner:
                 "english",
             )
 
-            await sub.info_output(f"Original keywords: {original_keywords}")
-            await sub.info_output(f"Translated keywords: {translated_keywords}")
+            await sub.info(f"Original keywords: {original_keywords}")
+            await sub.info(f"Translated keywords: {translated_keywords}")
 
         async with ctx.scope("Search internet for original question and keywords") as sub:
             # TODO: may extract these into a query string builder
@@ -327,8 +328,8 @@ class Planner:
 
         return initial_note
 
-    async def research(self, original_question: str) -> str:
-        async with Context("Research") as sub:
+    async def research(self, ctx: Context, original_question: str) -> str:
+        async with ctx.scope("Research") as sub:
             initial_note = await self.take_initial_note(sub, original_question)
 
         return initial_note

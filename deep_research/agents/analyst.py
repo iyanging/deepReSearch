@@ -279,7 +279,7 @@ Judge if this document MAY be useful for answering the question.
     that preserves the original context and content.
 - Please ensure that the first note MUST include all original text information useful
     for answering the question.
-- Identify the language of the question and take note in the same language.
+- Take note in the SAME LANGUAGE as the original question.
 - Use multiple paragraphs to separate different ideas or points.
 - No markdown formatting.
 - If content is useless for the note, You MUST record `null` directly.
@@ -347,8 +347,8 @@ Take a note from document, then try to bring up a expanded new question.
             do_ctx_info_reasoning="as_output",
         )
 
-        await ctx.info_output(f"original note: {original_note}")
-        await ctx.info_output(f"expanded question: {expanded_question}")
+        await ctx.info(f"original note: {original_note}")
+        await ctx.info(f"expanded question: {expanded_question}")
 
         return (original_note, expanded_question)
 
@@ -374,10 +374,10 @@ Take a note from document, then try to bring up a expanded new question.
 # Task
 
 Based on the provided documents notes, distill/summarize a note.
-The note should integrate all relevant information from the original text,
+The note should integrate all relevant information from the original documents notes,
 which can help answer the specified questions and form a coherent paragraph.
-Please ensure that the note includes all original text information useful
-for answering the question.
+
+The final note should write in the SAME LANGUAGE as the original question.
 
 # Question
 {question}
@@ -406,6 +406,7 @@ Distill a note from the following documents notes to help answer the specified q
             ],
             str,
             do_ctx_info_reasoning="as_reasoning",
+            do_ctx_info_output="as_output",
         )
 
         return note

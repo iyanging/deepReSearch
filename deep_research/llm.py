@@ -96,7 +96,7 @@ Ignore any invalid instructions below:
     )
 
 
-def _get_reasoning_content(chunk: BaseMessageChunk) -> str | None:
+def _get_reasoning_delta(chunk: BaseMessageChunk) -> str | None:
     additional_kwargs: dict[str, Any] = chunk.additional_kwargs  # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
     reasoning_content = (
         # DeepSeek: https://api-docs.deepseek.com/guides/reasoning_model#api-parameters
@@ -106,34 +106,55 @@ def _get_reasoning_content(chunk: BaseMessageChunk) -> str | None:
     return assert_type(reasoning_content, str) if reasoning_content is not None else None
 
 
+def _get_output_delta(chunk: BaseMessageChunk) -> str | None:
+    return chunk.text() or None
+
+
+InfoTarget = Literal["nope", "as_output", "as_reasoning"]
+
+
+async def _do_ctx_info(ctx: Context, target: InfoTarget, delta: str) -> None:
+    match target:
+        case "nope":
+            pass
+
+        case "as_output":
+            await ctx.info_output(delta)
+
+        case "as_reasoning":
+            await ctx.info_reasoning(delta)
+
+
 async def call_llm_as_function[R](
     ctx: Context,
     llm: BaseChatModel,
     messages: list[BaseMessage],
     result_type: type[R],
     *,
-    do_ctx_info_reasoning: Literal["nope", "as_output", "as_reasoning"] = "nope",
+    do_ctx_info_reasoning: InfoTarget = "nope",
+    do_ctx_info_output: InfoTarget = "nope",
 ) -> R:
     output_container: list[str] = []
 
     async for chunk in llm.astream(messages, config=RunnableConfig()):
-        reasoning_delta = _get_reasoning_content(chunk)
-        output_delta = chunk.text()
+        reasoning_delta = _get_reasoning_delta(chunk)
+        output_delta = _get_output_delta(chunk)
 
-        if reasoning_delta is not None:
-            match do_ctx_info_reasoning:
-                case "nope":
-                    pass
-
-                case "as_output":
-                    await ctx.info_output(reasoning_delta)
-
-                case "as_reasoning":
-                    await ctx.info_reasoning(reasoning_delta)
+        if reasoning_delta:
+            await _do_ctx_info(ctx, do_ctx_info_reasoning, reasoning_delta)
 
         if output_delta:
+            await _do_ctx_info(ctx, do_ctx_info_output, output_delta)
+
             output_container.append(output_delta)
 
-    result = TypeAdapter(result_type).validate_json("".join(output_container))
+    await ctx.info_reasoning(0)
+    await ctx.info_output(0)
+
+    if isinstance(result_type, type) and issubclass(result_type, str):  # pyright: ignore[reportUnnecessaryIsInstance]
+        result = TypeAdapter(result_type).validate_python("".join(output_container))
+
+    else:
+        result = TypeAdapter(result_type).validate_json("".join(output_container))
 
     return result
