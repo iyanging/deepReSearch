@@ -164,10 +164,6 @@ class Planner:
             )
             logger.info("Fetched %d documents", len(unchecked_documents))
 
-            if not unchecked_documents:
-                logger.info("No more documents to fetch")
-                break
-
             # TODO: design a DocumentFetcher to skip fetching those checked documents
             async for result in parallel(
                 {
@@ -188,6 +184,10 @@ class Planner:
                     document,
                     validity,
                 )
+
+            if len(unchecked_documents) < search_count:
+                logger.info("No more documents to fetch")
+                break
 
         valid_documents = {
             document for document, v in checked_document_to_validity.items() if v is True
